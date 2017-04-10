@@ -28,6 +28,13 @@ set -g BUILD_DIR "llvm-build-master-cmake"
 # delete build dir?
 set -g RM_BUILD_DIR 1
 
+function checked_status 
+    if test $argv[1] -ne 0
+        echo "[ERROR]" $argv[2] 
+        exit $argv[1]
+    end
+end
+
 
 ###### functions
 
@@ -42,9 +49,11 @@ function fetch_llvm
         if test -d "./$pd";
             pushd $pd
             git pull
+            checked_status $status "git pull failed"
             popd
         else
             git clone "$GIT_MIRROR/$p" $pd
+            checked_status $status "git clone failed"
         end
     end
 
@@ -124,6 +133,13 @@ function build_llvm
 
     echo "[+] Building $v with $j jobs"
     echo "[+] using build dir $BUILD_DIR"
+
+    if not which clang >/dev/null ^/dev/null
+        echo "[+] falling back to $CC/$CXX for building"
+        set -x CC gcc
+        set -x CXX g++
+    end
+
     echo "[+] using $CXX for building"
 
     if test $RM_BUILD_DIR -eq 1
@@ -141,6 +157,7 @@ function build_llvm
     if test $RM_BUILD_DIR -eq 1
         echo "[+] cmake"
         cmake $CMAKE_OPTIONS -G $BUILD_COMMAND_CMAKE ../llvm-git/
+        checked_status $status "cmake failed"
     end
 
     echo "[+] starting build process: '$BUILD_COMMAND $BUILD_COMMAND_JOBS $j'"
@@ -148,6 +165,7 @@ function build_llvm
     if test $status -ne 0
         echo "[+] build process failed, retrying with 1 build process"
         eval $BUILD_COMMAND $BUILD_COMMAND_JOBS 1
+        checked_status $status "build failed"
     end
 
     popd
