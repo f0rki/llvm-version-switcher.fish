@@ -7,11 +7,16 @@
 # ----------------------------------------------------------------------------
 
 # prefered git mirror
-set -g GIT_MIRROR "https://github.com/llvm-mirror/"
+# LLVM official git monorepo
+set -g GIT_MIRROR "https://github.com/llvm/llvm-project.git"
+# LLVM inofficial github mirror
+#set -g GIT_MIRROR "https://github.com/llvm-mirror/"
+# set to 1 if mirror is a LLVM monorepo or legacy style git/svn repos
+set -g LLVM_MONO_REPO 1
 # default version
 set -g VERSION "master"
 # default number of jobs
-set -g JOBS 2
+set -g JOBS 8
 # set the compiler
 set -x CC clang
 set -x CXX clang++
@@ -20,17 +25,17 @@ set -g BUILD_COMMAND "ninja"
 set -g BUILD_COMMAND_CMAKE "Ninja"
 set -g BUILD_COMMAND_JOBS "-j"
 # additional cmake options
-set -g CMAKE_OPTIONS ""
-# llvm projects
+set -g CMAKE_OPTIONS "-DCMAKE_EXPORT_COMPILE_COMMANDS=ON -DLLVM_CCACHE_BUILD=1 -DCMAKE_BUILD_TYPE=RelWithDebInfo"
+# llvm projects to build
 set -g LLVM_PROJECTS llvm llvm/tools/clang llvm/projects/compiler-rt
 # default build dir
 set -g BUILD_DIR "llvm-build-master-cmake"
 # delete build dir?
 set -g RM_BUILD_DIR 1
 
-function checked_status 
+function checked_status
     if test $argv[1] -ne 0
-        echo "[ERROR]" $argv[2] 
+        echo "[ERROR]" $argv[2]
         exit $argv[1]
     end
 end
@@ -42,33 +47,49 @@ function fetch_llvm
 
     echo "[+] git clone/pull'ing"
 
-    for proj in $LLVM_PROJECTS
-        set p (basename $proj)
-        set pd $p-git
-        echo "[+] fetching $p"
-        if test -d "./$pd";
-            pushd $pd
+    if test $LLVM_MONO_REPO -eq 0
+
+        # not a monorepo
+
+        for proj in $LLVM_PROJECTS
+            set p (basename $proj)
+            set pd $p-git
+            echo "[+] fetching $p"
+            if test -d "./$pd";
+                pushd $pd
+                git pull
+                checked_status $status "git pull failed"
+                popd
+            else
+                git clone "$GIT_MIRROR/$p" $pd
+                checked_status $status "git clone failed"
+            end
+        end
+
+        echo "[+] symlinking if needed"
+
+        for proj in $LLVM_PROJECTS
+            set pd (basename $proj)-git
+            if test -L $proj; or test -d $proj
+                # all good here
+                ;
+            else
+                echo "[+] symlinking $proj to $pd"
+                ln -s (realpath ./$pd) $proj
+            end
+        end
+    else
+        # monorepo: yes
+        if test -d "./llvm-project";
+            pushd "./llvm-project"
             git pull
             checked_status $status "git pull failed"
             popd
         else
-            git clone "$GIT_MIRROR/$p" $pd
+            git clone "$GIT_MIRROR"
             checked_status $status "git clone failed"
         end
     end
-
-    echo "[+] symlinking if needed"
-
-    for proj in $LLVM_PROJECTS
-        set pd (basename $proj)-git
-        if test -L $proj; or test -d $proj
-            ;
-        else
-            echo "[+] symlinking $proj to $pd"
-            ln -s (realpath ./$pd) $proj
-        end
-    end
-
 end
 
 
@@ -83,17 +104,31 @@ function switch_llvm
 
     set v $VERSION
     if echo "$VERSION" | grep "\." >/dev/null
-        set v (echo "release_$VERSION" | sed 's/\.//g')
+        if test $LLVM_MONO_REPO -eq 0
+            set v (echo "release_$VERSION" | sed 's/\.//g')
+        else
+            # monorepo uses branches like 'release/8.x' and tags like
+            # llvmorg-8.x.x
+            # TODO: exact version switching?
+            set v "release/"(echo $VERSION | sed -E 's/\.[0-9]+//g')".x"
+        end
     end
 
     fetch_llvm
 
-    for proj in $LLVM_PROJECTS
-        set p (basename $proj)
-        set pd $p-git
-        echo "[+] checking out latest $v for $p"
+    if test $LLVM_MONO_REPO -eq 0
+        for proj in $LLVM_PROJECTS
+            set p (basename $proj)
+            set pd $p-git
+            echo "[+] checking out latest $v for $p"
 
-        pushd $pd
+            pushd $pd
+            git checkout $v
+            git pull
+            popd
+        end
+    else
+        pushd "./llvm-project"
         git checkout $v
         git pull
         popd
@@ -155,9 +190,30 @@ function build_llvm
     end
 
     if test $RM_BUILD_DIR -eq 1
-        echo "[+] cmake"
-        cmake $CMAKE_OPTIONS -G $BUILD_COMMAND_CMAKE ../llvm-git/
-        checked_status $status "cmake failed"
+        if test $LLVM_MONO_REPO -eq 0
+
+            for proj in $LLVM_PROJECTS
+                set p (basename $proj)
+                if test "$p" != "llvm"
+                    if test "$llvm_project_list" = ""
+                        set -l llvm_project_list "$p"
+                    else
+                        set -l llvm_project_list "$llvm_project_list;$p"
+                    end
+                end
+            end
+
+            set -g CMAKE_OPTIONS "$CMAKE_OPTIONS -DLLVM_ENABLE_PROJECTS='$llvm_project_list'"
+
+            echo "[+] cmake $CMAKE_OPTIONS -G $BUILD_COMMAND_CMAKE ../llvm-project/"
+            cmake $CMAKE_OPTIONS -G $BUILD_COMMAND_CMAKE ../llvm-project/
+            checked_status $status "cmake failed"
+
+        else
+            echo "[+] cmake $CMAKE_OPTIONS -G $BUILD_COMMAND_CMAKE ../llvm-git/"
+            cmake $CMAKE_OPTIONS -G $BUILD_COMMAND_CMAKE ../llvm-git/
+            checked_status $status "cmake failed"
+        end
     end
 
     echo "[+] starting build process: '$BUILD_COMMAND $BUILD_COMMAND_JOBS $j'"
